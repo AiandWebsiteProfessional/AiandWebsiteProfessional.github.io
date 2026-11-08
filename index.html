@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0f172a">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.svg">
+<title>Local AI</title>
+<style>
+  :root { --bg:#0f172a; --panel:#1e293b; --text:#e2e8f0; --muted:#94a3b8; --accent:#38bdf8; --user:#0369a1; }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#f8fafc; --panel:#e2e8f0; --text:#0f172a; --muted:#475569; --accent:#0284c7; --user:#bae6fd; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; height:100dvh; display:flex; flex-direction:column; background:var(--bg); color:var(--text); font:16px/1.5 system-ui,sans-serif; }
+  header { padding:12px 16px; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--panel); }
+  header b { font-size:18px; }
+  #status { color:var(--muted); font-size:13px; }
+  #bar { height:3px; background:var(--panel); } #bar i { display:block; height:100%; width:0; background:var(--accent); transition:width .2s; }
+  #chat { flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:10px; }
+  .msg { max-width:85%; padding:10px 14px; border-radius:14px; white-space:pre-wrap; word-wrap:break-word; background:var(--panel); }
+  .msg.user { align-self:flex-end; background:var(--user); color:var(--text); }
+  form { display:flex; gap:8px; padding:12px; border-top:1px solid var(--panel); }
+  textarea { flex:1; resize:none; border-radius:12px; border:1px solid var(--panel); background:var(--panel); color:var(--text); padding:10px; font:inherit; }
+  button { border:0; border-radius:12px; padding:0 18px; background:var(--accent); color:#fff; font-weight:600; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  #load { margin:auto; text-align:center; max-width:340px; }
+  #load p { color:var(--muted); font-size:14px; }
+</style>
+</head>
+<body>
+<header><b>Local AI</b><span id="status">Not loaded</span></header>
+<div id="bar"><i></i></div>
+<div id="chat">
+  <div id="load">
+    <p>This runs a small AI model entirely on your device. The first load downloads about 1 GB (cached afterward, then works offline). Use Wi-Fi.</p>
+    <button id="loadBtn" style="padding:12px 24px">Download &amp; start</button>
+  </div>
+</div>
+<form id="form">
+  <textarea id="input" rows="1" placeholder="Load the model first..." disabled></textarea>
+  <button id="send" disabled>Send</button>
+</form>
+
+<script type="module">
+import { pipeline, TextStreamer } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3";
+
+const $ = id => document.getElementById(id);
+const chat = $("chat"), input = $("input"), send = $("send"), status = $("status"), bar = $("bar").firstElementChild;
+let generator = null, busy = false;
+const history = [{ role: "system", content: "You are a helpful, concise assistant. If you are not sure, say so." }];
+
+function add(role, text) {
+  const d = document.createElement("div");
+  d.className = "msg " + role; d.textContent = text;
+  chat.appendChild(d); chat.scrollTop = chat.scrollHeight; return d;
+}
+
+async function load() {
+  $("loadBtn").disabled = true;
+  const gpu = !!navigator.gpu;
+  const opts = gpu
+    ? { model: "onnx-community/Llama-3.2-1B-Instruct-q4f16", device: "webgpu", dtype: "q4f16" }
+    : { model: "onnx-community/Llama-3.2-1B-Instruct", device: "wasm", dtype: "q4" };
+  status.textContent = gpu ? "Loading (WebGPU)..." : "Loading (CPU, slower)...";
+  try {
+    generator = await pipeline("text-generation", opts.model, {
+      device: opts.device, dtype: opts.dtype,
+      progress_callback: p => { if (p.status === "progress") bar.style.width = p.progress + "%"; }
+    });
+    $("load").remove(); bar.style.width = "0";
+    status.textContent = "Ready · " + (gpu ? "GPU" : "CPU") + " · offline";
+    input.disabled = send.disabled = false; input.placeholder = "Ask anything...";
+    add("ai", "Model loaded. Everything stays on this device.");
+  } catch (e) {
+    status.textContent = "Load failed"; $("loadBtn").disabled = false;
+    add("ai", "Error: " + e.message);
+  }
+}
+
+async function ask(text) {
+  busy = true; send.disabled = true;
+  add("user", text); history.push({ role: "user", content: text });
+  const out = add("ai", "…"); let acc = "";
+  const streamer = new TextStreamer(generator.tokenizer, {
+    skip_prompt: true, skip_special_tokens: true,
+    callback_function: t => { acc += t; out.textContent = acc; chat.scrollTop = chat.scrollHeight; }
+  });
+  try {
+    await generator(history, { max_new_tokens: 512, do_sample: false, streamer });
+    history.push({ role: "assistant", content: acc });
+  } catch (e) { out.textContent = "Error: " + e.message; }
+  busy = false; send.disabled = false; input.focus();
+}
+
+$("loadBtn").onclick = load;
+$("form").onsubmit = e => {
+  e.preventDefault();
+  const t = input.value.trim();
+  if (!t || busy || !generator) return;
+  input.value = ""; ask(t);
+};
+input.addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("form").requestSubmit(); }
+});
+
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+</script>
+</body>
+</html>
